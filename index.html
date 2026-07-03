@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>📦 庫存記錄</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; max-width: 680px; margin: 2rem auto; padding: 0 1rem; background: #f7f8fa; }
+    .card { background: white; border-radius: 16px; padding: 2rem; box-shadow: 0 2px 10px rgba(0,0,0,0.06); }
+    h1 { font-size: 1.4rem; font-weight: 600; margin-top: 0; color: #1e293b; }
+    .hint { color: #64748b; font-size: 0.85rem; margin-bottom: 1.2rem; }
+    textarea { width: 100%; min-height: 110px; padding: 10px; font-size: 0.95rem; border: 1px solid #d1d5db; border-radius: 8px; font-family: monospace; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+    .row label { flex: 1; min-width: 80px; font-weight: 500; color: #334155; }
+    .row input, .row select { width: 100%; padding: 6px 10px; border: 1px solid #d1d5db; border-radius: 6px; }
+    .btn { background: #1e293b; color: white; border: none; padding: 8px 20px; border-radius: 8px; font-weight: 500; cursor: pointer; transition: 0.2s; margin-top: 10px; }
+    .btn:hover { background: #0f172a; }
+    .preview { margin-top: 18px; border-top: 1px solid #e2e8f0; padding-top: 14px; display: none; }
+    .preview-item { background: #f1f5f9; border-radius: 6px; padding: 6px 12px; margin-bottom: 4px; font-size: 0.9rem; }
+    .status { margin-top: 14px; padding: 10px; border-radius: 8px; display: none; }
+    .status.ok { display: block; background: #dcfce7; color: #166534; }
+    .status.err { display: block; background: #fee2e2; color: #991b1b; }
+  </style>
+</head>
+<body>
+<div class="card">
+  <h1>📋 新增項目</h1>
+  <p class="hint">請輸入（每行一筆），格式：<br>
+  <code style="background:#eef2f6;padding:2px 8px;border-radius:4px;">入 1 ABC 31Jul26 65 A @ 1.5</code> 或 <code style="background:#eef2f6;padding:2px 8px;border-radius:4px;">出 2 XYZ 15Aug25 180 B @ 2.3</code></p>
+
+  <textarea id="inputArea" placeholder="貼上你嘅項目記錄..."></textarea>
+  <button class="btn" id="parseBtn">🔍 解讀</button>
+
+  <div id="previewArea" class="preview">
+    <div style="font-weight:500;margin-bottom:6px;">📌 預覽</div>
+    <div id="previewList"></div>
+    <button class="btn" id="confirmBtn" style="background:#0b6e4f;margin-top:8px;">💾 儲存</button>
+  </div>
+
+  <div id="status" class="status"></div>
+</div>
+<script>
+// ========== GitHub 設定（請替換） ==========
+const GITHUB_TOKEN = '你的Token';
+const REPO_OWNER = '你的用戶名';
+const REPO_NAME = '你的倉庫名';
+const FILE_PATH = 'widget-data.json';
+const RAW_URL = `https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/main/${FILE_PATH}`;
+const API_URL = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${FILE_PATH}`;
+
+// ========== 混淆規則（與 Widget 一致） ==========
+const OBFUSCATE = {
+  symbolMap: { 'ABC': 'XQZ', 'XYZ': 'MNB' }, // 自行加其他
+  reverseSymbolMap: { 'XQZ': 'ABC', 'MNB': 'XYZ' },
+  strikeOffset: 10,
+  premiumMultiplier: 10,
+  dateOffset: { year: -1, month: 2, day: 5 },
+  actionMap: { '入': 'SOLD', '出': 'BOUGHT' },  // 注意：入=SOLD（收入），出=BOUGHT（支出）
+  reverseActionMap: { 'SOLD': '入', 'BOUGHT': '出' },
+  typeMap: { 'A': 'PUT', 'B': 'CALL' },
+  reverseTypeMap: { 'PUT': 'A', 'CALL': 'B' },
+  fieldMap: { 'action':'a', 'symbol':'s', 'expiry_date':'e', 'strike':'k', 'type':'t', 'premium':'p', 'contracts':'c' },
+  reverseFieldMap: { 'a':'action', 's':'symbol', 'e':'expiry_date', 'k':'strike', 't':'type', 'p':'premium', 'c':'contracts' }
+};
+
+// ========== 解析自然語言（模糊版） ==========
+function parseLine(line) {
+  // 支援：入 1 ABC 31Jul26 65 A @ 1.5
+  const m = line.match(/^(入|出)\s+(\d+)\s+([A-Z]+)\s+(\d{1,2}[A-Za-z]{3}\d{2,4})\s+(\d+(?:\.\d+)?)\s+([AB])\s+@\s+([\d.]+)$/i);
+  if (!m) return null;
+  const dateStr = m[4];
+  const day = dateStr.slice(0,2);
+  const mon = dateStr.slice(2,5).toUpperCase();
+  let year = dateStr.slice(5);
+  if (year.length === 2) year = '20' + year;
+  const monthMap = { 'JAN':'01','FEB':'02','MAR':'03','APR':'04','MAY':'05','JUN':'06','JUL':'07','AUG':'08','SEP':'09','OCT':'10','NOV':'11','DEC':'12' };
+  const mm = monthMap[mon] || '01';
+  const expiry = `${year}-${mm}-${day.padStart(2,'0')}`;
+  return {
+    action: m[1] === '入' ? 'SOLD' : 'BOUGHT',
+    contracts: parseInt(m[2]),
+    symbol: m[3].toUpperCase(),
+    expiry_date: expiry,
+    strike: parseFloat(m[5]),
+    type: m[6] === 'A' ? 'PUT' : 'CALL',
+    premium: parseFloat(m[7]) * 100  // 轉為總權利金
+  };
+}
+
+// ========== 編碼/解碼（同之前） ==========
+function encodeTrade(t) { /* 同之前，略 */ }
+function decodeTrade(e) { /* 同之前，略 */ }
+function recalcSummary(trades, fx) { /* 同之前，略 */ }
+
+// ========== UI 互動 ==========
+const inputArea = document.getElementById('inputArea');
+const parseBtn = document.getElementById('parseBtn');
+const previewArea = document.getElementById('previewArea');
+const previewList = document.getElementById('previewList');
+const confirmBtn = document.getElementById('confirmBtn');
+const statusDiv = document.getElementById('status');
+let parsed = [];
+
+parseBtn.onclick = function() {
+  const lines = inputArea.value.split('\n').filter(l => l.trim());
+  parsed = [];
+  let bad = [];
+  lines.forEach((l, i) => {
+    const r = parseLine(l);
+    if (r) parsed.push(r);
+    else bad.push(`第${i+1}行：${l}`);
+  });
+  if (bad.length) {
+    statusDiv.className = 'status err';
+    statusDiv.textContent = '⚠️ 有 ' + bad.length + ' 行無法解讀：' + bad.join('；');
+    statusDiv.style.display = 'block';
+    previewArea.style.display = 'none';
+    return;
+  }
+  if (!parsed.length) {
+    statusDiv.className = 'status err';
+    statusDiv.textContent = '⚠️ 沒有有效項目';
+    statusDiv.style.display = 'block';
+    previewArea.style.display = 'none';
+    return;
+  }
+  previewArea.style.display = 'block';
+  previewList.innerHTML = parsed.map(t => 
+    `<div class="preview-item">${t.action} ${t.contracts}×${t.symbol} ${t.expiry_date} ${t.strike} ${t.type} @ ${(t.premium/100).toFixed(2)} ($${t.premium})</div>`
+  ).join('');
+  statusDiv.style.display = 'none';
+};
+
+confirmBtn.onclick = async function() {
+  if (!parsed.length) return;
+  confirmBtn.disabled = true;
+  confirmBtn.textContent = '儲存中...';
+  statusDiv.className = 'status';
+  statusDiv.textContent = '⏳ 處理中';
+  statusDiv.style.display = 'block';
+  try {
+    const resp = await fetch(RAW_URL);
+    if (!resp.ok) throw new Error('下載失敗');
+    const old = await resp.json();
+    let trades = [];
+    if (old.dashboard?.next_expiry_top3) {
+      trades = old.dashboard.next_expiry_top3.map(t => decodeTrade(t));
+    }
+    trades = trades.concat(parsed);
+    const fx = old.fx?.usd_to_hkd || 7.8;
+    const summary = recalcSummary(trades, fx);
+    const newData = {
+      as_of: new Date().toISOString().slice(0,10),
+      fx: { usd_to_hkd: fx },
+      summary: summary,
+      dashboard: {
+        month_progress_pct: (summary.month_income_usd / 700) * 100,
+        month_remaining_usd: Math.max(0, 700 - summary.month_income_usd),
+        monthly_data: old.dashboard?.monthly_data || [0,0,0,0,0,0,0,0,0,0,0,0],
+        next_expiry_top3: trades.map(t => encodeTrade(t))
+      }
+    };
+    const content = JSON.stringify(newData, null, 2);
+    const base64 = btoa(unescape(encodeURIComponent(content)));
+    const getResp = await fetch(API_URL, { headers: { 'Authorization': `token ${GITHUB_TOKEN}` } });
+    if (!getResp.ok) throw new Error('無法取得SHA');
+    const file = await getResp.json();
+    const putResp = await fetch(API_URL, {
+      method: 'PUT',
+      headers: { 'Authorization': `token ${GITHUB_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: 'update', content: base64, sha: file.sha, branch: 'main' })
+    });
+    if (!putResp.ok) throw new Error('更新失敗');
+    statusDiv.className = 'status ok';
+    statusDiv.textContent = '✅ 已儲存 ' + parsed.length + ' 項';
+    inputArea.value = '';
+    previewArea.style.display = 'none';
+    parsed = [];
+  } catch (e) {
+    statusDiv.className = 'status err';
+    statusDiv.textContent = '❌ ' + e.message;
+  } finally {
+    confirmBtn.disabled = false;
+    confirmBtn.textContent = '💾 儲存';
+  }
+};
+</script>
+</body>
+</html>
